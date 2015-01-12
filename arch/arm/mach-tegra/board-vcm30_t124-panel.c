@@ -313,18 +313,21 @@ static struct nvmap_platform_carveout vcm30_t124_carveouts[] = {
 		.usage_mask	= NVMAP_HEAP_CARVEOUT_IRAM,
 		.base		= TEGRA_IRAM_BASE + TEGRA_RESET_HANDLER_SIZE,
 		.size		= TEGRA_IRAM_SIZE - TEGRA_RESET_HANDLER_SIZE,
+		.dma_dev	= &tegra_iram_dev,
 	},
 	[1] = {
 		.name		= "generic-0",
 		.usage_mask	= NVMAP_HEAP_CARVEOUT_GENERIC,
 		.base		= 0, /* Filled in by vcm30_t124_panel_init() */
 		.size		= 0, /* Filled in by vcm30_t124_panel_init() */
+		.dma_dev	= &tegra_generic_dev,
 	},
 	[2] = {
 		.name		= "vpr",
 		.usage_mask	= NVMAP_HEAP_CARVEOUT_VPR,
 		.base		= 0, /* Filled in by vcm30_t124_panel_init() */
 		.size		= 0, /* Filled in by vcm30_t124_panel_init() */
+		.dma_dev	= &tegra_vpr_dev,
 	},
 };
 
@@ -345,14 +348,17 @@ int __init vcm30_t124_panel_init(void)
 	int err = 0;
 	struct resource *res;
 	struct platform_device *phost1x = NULL;
-#ifdef CONFIG_TEGRA_NVMAP
+#ifdef CONFIG_NVMAP_USE_CMA_FOR_CARVEOUT
 	struct dma_declare_info vpr_dma_info;
 	struct dma_declare_info generic_dma_info;
 
 	vcm30_t124_carveouts[1].base = tegra_carveout_start;
 	vcm30_t124_carveouts[1].size = tegra_carveout_size;
+
 	vcm30_t124_carveouts[2].base = tegra_vpr_start;
 	vcm30_t124_carveouts[2].size = tegra_vpr_size;
+
+#ifdef CONFIG_NVMAP_USE_CMA_FOR_CARVEOUT
 	generic_dma_info.name = "generic";
 	generic_dma_info.base = tegra_carveout_start;
 	generic_dma_info.size = tegra_carveout_size;
@@ -364,20 +370,15 @@ int __init vcm30_t124_panel_init(void)
 	vpr_dma_info.size = tegra_vpr_size;
 	vpr_dma_info.resize = false;
 	vpr_dma_info.cma_dev = NULL;
-#ifdef CONFIG_NVMAP_USE_CMA_FOR_CARVEOUT
-	carveout_linear_set(&tegra_generic_cma_dev);
 	vcm30_t124_carveouts[1].cma_dev = &tegra_generic_cma_dev;
 	vcm30_t124_carveouts[1].resize = false;
-	carveout_linear_set(&tegra_vpr_cma_dev);
 	vcm30_t124_carveouts[2].cma_dev = &tegra_vpr_cma_dev;
 	vcm30_t124_carveouts[2].resize = true;
-	vcm30_t124_carveouts[2].cma_chunk_size = SZ_32M;
 
 	vpr_dma_info.size = SZ_32M;
 	vpr_dma_info.resize = true;
 	vpr_dma_info.cma_dev = &tegra_vpr_cma_dev;
 	vpr_dma_info.notifier.ops = &vpr_dev_ops;
-#endif
 
 	if (tegra_carveout_size) {
 		err = dma_declare_coherent_resizable_cma_memory(
@@ -395,6 +396,7 @@ int __init vcm30_t124_panel_init(void)
 			return err;
 		}
 	}
+#endif
 
 	err = platform_device_register(&vcm30_t124_nvmap_device);
 	if (err) {

@@ -22,6 +22,7 @@
 
 #define pr_fmt(fmt)	"%s: " fmt, __func__
 
+#include <linux/debugfs.h>
 #include <linux/device.h>
 #include <linux/kernel.h>
 #include <linux/list.h>
@@ -48,7 +49,6 @@
  * The carveout allocator returns allocations which are physically contiguous.
  */
 
-extern struct device tegra_vpr_dev;
 static struct kmem_cache *heap_block_cache;
 
 struct list_block {
@@ -71,13 +71,32 @@ struct nvmap_heap {
 	phys_addr_t base;
 	/* heap size */
 	size_t len;
+	struct device *cma_dev;
+	struct device *dma_dev;
+	struct device dev;
 };
+
+void nvmap_heap_debugfs_init(struct dentry *heap_root, struct nvmap_heap *heap)
+{
+	if (sizeof(heap->base) == sizeof(u64))
+		debugfs_create_x64("base", S_IRUGO,
+			heap_root, (u64 *)&heap->base);
+	else
+		debugfs_create_x32("base", S_IRUGO,
+			heap_root, (u32 *)&heap->base);
+	if (sizeof(heap->len) == sizeof(u64))
+		debugfs_create_x64("size", S_IRUGO,
+			heap_root, (u64 *)&heap->len);
+	else
+		debugfs_create_x32("size", S_IRUGO,
+			heap_root, (u32 *)&heap->len);
+}
 
 static phys_addr_t nvmap_alloc_mem(struct nvmap_heap *h, size_t len)
 {
 	phys_addr_t pa;
 	DEFINE_DMA_ATTRS(attrs);
-	struct device *dev = &tegra_vpr_dev;
+	struct device *dev = h->dma_dev;
 
 	dma_set_attr(DMA_ATTR_ALLOC_EXACT_SIZE, &attrs);
 
@@ -93,7 +112,7 @@ static phys_addr_t nvmap_alloc_mem(struct nvmap_heap *h, size_t len)
 static void nvmap_free_mem(struct nvmap_heap *h, phys_addr_t base,
 				size_t len)
 {
-	struct device *dev = &tegra_vpr_dev;
+	struct device *dev = h->dma_dev;
 	DEFINE_DMA_ATTRS(attrs);
 
 	dma_set_attr(DMA_ATTR_ALLOC_EXACT_SIZE, &attrs);
@@ -114,7 +133,7 @@ static struct nvmap_heap_block *do_heap_alloc(struct nvmap_heap *heap,
 {
 	struct list_block *heap_block = NULL;
 	dma_addr_t dev_base;
-	struct device *dev = &tegra_vpr_dev;
+	struct device *dev = heap->dma_dev;
 
 	/* since pages are only mappable with one cache attribute,
 	 * and most allocations from carveout heaps are DMA coherent
@@ -231,9 +250,6 @@ struct nvmap_heap *nvmap_heap_create(struct device *parent,
 		return NULL;
 	}
 
-	h->name = co->name;
-	h->arg = arg;
-
 	if (co->cma_dev) {
 #ifdef CONFIG_CMA
 		struct dma_contiguous_stats stats;
@@ -241,12 +257,38 @@ struct nvmap_heap *nvmap_heap_create(struct device *parent,
 		dma_get_contiguous_stats(co->cma_dev, &stats);
 		base = stats.base;
 		len = stats.size;
+		h->cma_dev = co->cma_dev;
+		h->dma_dev = co->dma_dev;
 #else
-		kfree(h);
-		return NULL;
+		goto fail;
 #endif
+	} else {
+		int err;
+
+		if (co->dma_dev)
+			h->dma_dev = co->dma_dev;
+		else
+			/* To continue working with bsp that doesn't
+			 * pass dma_dev ptr.
+			 */
+			h->dma_dev = &h->dev;
+		dev_set_name(h->dma_dev, "%s", co->name);
+		dma_set_coherent_mask(h->dma_dev, DMA_BIT_MASK(64));
+		/* declare Non-CMA heap */
+		err = dma_declare_coherent_memory(h->dma_dev, 0, base, len,
+				DMA_MEMORY_NOMAP | DMA_MEMORY_EXCLUSIVE);
+		if (err & DMA_MEMORY_NOMAP) {
+			dev_info(h->dma_dev, "dma coherent mem declare %pa,%zu\n",
+				&base, len);
+		} else {
+			dev_dbg(h->dma_dev, "dma coherent declare fail %pa,%zu\n",
+				&base, len);
+			goto fail;
+		}
 	}
 
+	h->name = co->name;
+	h->arg = arg;
 	h->base = base;
 	h->len = len;
 	INIT_LIST_HEAD(&h->all_list);
@@ -264,6 +306,9 @@ struct nvmap_heap *nvmap_heap_create(struct device *parent,
 	dev_info(parent, "created heap %s base 0x%p size (%zuKiB)\n",
 		co->name, (void *)(uintptr_t)base, len/1024);
 	return h;
+fail:
+	kfree(h);
+	return NULL;
 }
 
 void *nvmap_heap_to_arg(struct nvmap_heap *heap)

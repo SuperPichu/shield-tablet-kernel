@@ -686,6 +686,10 @@ static void __init tegra_vcm30_t124_dt_init(void)
 	tegra_get_display_board_info(&display_board_info);
 
 	tegra_vcm30_t124_early_init();
+#ifdef CONFIG_NVMAP_USE_CMA_FOR_CARVEOUT
+	carveout_linear_set(&tegra_generic_cma_dev);
+	carveout_linear_set(&tegra_vpr_cma_dev);
+#endif
 #ifdef CONFIG_USE_OF
 	of_platform_populate(NULL,
 		of_default_bus_match_table, vcm30_t124_auxdata_lookup,
@@ -699,9 +703,9 @@ static void __init tegra_vcm30_t124_reserve(void)
 {
 #if defined(CONFIG_NVMAP_CONVERT_CARVEOUT_TO_IOVMM)
 	/* 1920*1200*4*2 = 18432000 bytes */
-	tegra_reserve(0, SZ_16M + SZ_2M, SZ_16M + SZ_2M);
+	tegra_reserve4(0, SZ_16M + SZ_2M, SZ_16M + SZ_2M, 64 * SZ_1M);
 #else
-	tegra_reserve(SZ_128M, SZ_16M + SZ_2M, SZ_16M + SZ_2M);
+	tegra_reserve4(SZ_128M, SZ_16M + SZ_2M, SZ_16M + SZ_2M, 64 * SZ_1M);
 #endif
 }
 

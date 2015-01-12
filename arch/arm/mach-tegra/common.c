@@ -49,7 +49,7 @@
 #ifdef CONFIG_TRUSTED_LITTLE_KERNEL
 #include <linux/ote_protocol.h>
 #endif
-#include <linux/nvhost.h>
+#include <linux/gk20a.h>
 
 #ifdef CONFIG_ARM64
 #include <linux/irqchip/arm-gic.h>
@@ -187,19 +187,39 @@ struct device tegra_generic_cma_dev;
 struct device tegra_vpr_cma_dev;
 
 struct device tegra_generic_dev;
+
 struct device tegra_vpr_dev;
+EXPORT_SYMBOL(tegra_vpr_dev);
+
+struct device tegra_iram_dev;
+EXPORT_SYMBOL(tegra_iram_dev);
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/nvsecurity.h>
 
-static void tegra_update_resize_cfg(phys_addr_t base , size_t size)
+static int tegra_update_resize_cfg(phys_addr_t base , size_t size)
 {
+	int err = 0;
 #ifdef CONFIG_TRUSTED_LITTLE_KERNEL
-	/* Config VPR_BOM/_SIZE in MC */
-	te_set_vpr_params((void *)(uintptr_t)base, size);
-	/* trigger GPU to refetch VPR base and size. */
-	nvhost_vpr_info_fetch();
+#define MAX_RETRIES 6
+	int retries = MAX_RETRIES;
+
+retry:
+	err = gk20a_do_idle();
+	if (!err) {
+		/* Config VPR_BOM/_SIZE in MC */
+		err = te_set_vpr_params((void *)(uintptr_t)base, size);
+		gk20a_do_unidle();
+	} else {
+		if (retries--) {
+			pr_err("%s:%d: fail retry=%d",
+				__func__, __LINE__, MAX_RETRIES - retries);
+			msleep(1);
+			goto retry;
+		}
+	}
 #endif
+	return err;
 }
 
 struct dma_resize_notifier_ops vpr_dev_ops = {
@@ -1117,6 +1137,7 @@ int tegra_get_sku_override(void)
 	return sku_override;
 }
 
+#ifndef CONFIG_NVMAP_USE_CMA_FOR_CARVEOUT
 static int __init tegra_vpr_arg(char *options)
 {
 	char *p = options;
@@ -1129,6 +1150,7 @@ static int __init tegra_vpr_arg(char *options)
 	return 0;
 }
 early_param("vpr", tegra_vpr_arg);
+#endif
 
 static int __init tegra_tsec_arg(char *options)
 {
@@ -1840,7 +1862,7 @@ static void __init tegra_reserve_ramoops_memory(unsigned long reserve_size)
 	ramoops_data.console_size = reserve_size - FTRACE_MEM_SIZE;
 	ramoops_data.ftrace_size = FTRACE_MEM_SIZE;
 	ramoops_data.dump_oops = 1;
-	memblock_reserve(ramoops_data.mem_address, ramoops_data.mem_size);
+	memblock_remove(ramoops_data.mem_address, ramoops_data.mem_size);
 }
 
 static int __init tegra_register_ramoops_device(void)
@@ -2130,6 +2152,10 @@ void __init tegra_reserve(unsigned long carveout_size, unsigned long fb_size,
 	}
 #endif
 
+#ifdef CONFIG_PSTORE_RAM
+	tegra_reserve_ramoops_memory(RAMOOPS_MEM_SIZE);
+#endif
+
 #ifdef CONFIG_NVMAP_USE_CMA_FOR_CARVEOUT
 	/* Keep these at the end */
 	if (carveout_size) {
@@ -2146,9 +2172,16 @@ void __init tegra_reserve(unsigned long carveout_size, unsigned long fb_size,
 #endif
 
 	tegra_fb_linear_set(map);
-#ifdef CONFIG_PSTORE_RAM
-	tegra_reserve_ramoops_memory(RAMOOPS_MEM_SIZE);
+}
+
+void tegra_reserve4(ulong carveout_size, ulong fb_size,
+		       ulong fb2_size, ulong vpr_size)
+{
+#ifdef CONFIG_NVMAP_USE_CMA_FOR_CARVEOUT
+	tegra_vpr_start = 0;
+	tegra_vpr_size = vpr_size;
 #endif
+	tegra_reserve(carveout_size, fb_size, fb2_size);
 }
 
 void tegra_get_fb_resource(struct resource *fb_res)

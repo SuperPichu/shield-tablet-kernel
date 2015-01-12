@@ -210,6 +210,8 @@ struct gk20a {
 	bool power_on;
 	bool irq_requested;
 
+	struct rw_semaphore busy_lock;
+
 	struct clk_gk20a clk;
 	struct fifo_gk20a fifo;
 	struct gr_gk20a gr;
@@ -231,6 +233,8 @@ struct gk20a {
 	bool elcg_enabled;
 	bool elpg_enabled;
 	bool aelpg_enabled;
+	bool forced_idle;
+	bool forced_reset;
 
 #ifdef CONFIG_DEBUG_FS
 	spinlock_t debugfs_lock;
