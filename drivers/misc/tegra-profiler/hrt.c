@@ -1,7 +1,7 @@
 /*
  * drivers/misc/tegra-profiler/hrt.c
  *
- * Copyright (c) 2014, NVIDIA CORPORATION.  All rights reserved.
+ * Copyright (c) 2015, NVIDIA CORPORATION.  All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms and conditions of the GNU General Public License,
@@ -123,8 +123,31 @@ u64 quadd_get_time(void)
 		get_posix_clock_monotonic_time();
 }
 
+static void
+put_sample_cpu(struct quadd_record_data *data,
+	       struct quadd_iovec *vec,
+	       int vec_count, int cpu_id)
+{
+	ssize_t err;
+	struct quadd_comm_data_interface *comm = hrt.quadd_ctx->comm;
+
+	err = comm->put_sample(data, vec, vec_count, cpu_id);
+	if (err < 0)
+		atomic64_inc(&hrt.skipped_samples);
+
+	atomic64_inc(&hrt.counter_samples);
+}
+
+void
+quadd_put_sample(struct quadd_record_data *data,
+		 struct quadd_iovec *vec, int vec_count)
+{
+	put_sample_cpu(data, vec, vec_count, -1);
+}
+
 static void put_header(void)
 {
+	int cpu_id;
 	int nr_events = 0, max_events = QUADD_MAX_COUNTERS;
 	int events[QUADD_MAX_COUNTERS];
 	struct quadd_record_data record;
@@ -167,6 +190,9 @@ static void put_header(void)
 	if (hrt.use_arch_timer)
 		hdr->reserved |= QUADD_HDR_USE_ARCH_TIMER;
 
+	if (hrt.get_stack_offset)
+		hdr->reserved |= QUADD_HDR_STACK_OFFSET;
+
 	if (pmu)
 		nr_events += pmu->get_current_events(events, max_events);
 
@@ -179,16 +205,8 @@ static void put_header(void)
 	vec.base = events;
 	vec.len = nr_events * sizeof(events[0]);
 
-	quadd_put_sample(&record, &vec, 1);
-}
-
-void quadd_put_sample(struct quadd_record_data *data,
-		      struct quadd_iovec *vec, int vec_count)
-{
-	struct quadd_comm_data_interface *comm = hrt.quadd_ctx->comm;
-
-	comm->put_sample(data, vec, vec_count);
-	atomic64_inc(&hrt.counter_samples);
+	for_each_possible_cpu(cpu_id)
+		put_sample_cpu(&record, &vec, 1, cpu_id);
 }
 
 static void
@@ -284,6 +302,28 @@ static int read_source(struct quadd_event_source_interface *source,
 	return nr_events;
 }
 
+static long
+get_stack_offset(struct task_struct *task,
+		 struct pt_regs *regs,
+		 struct quadd_callchain *cc)
+{
+	unsigned long sp;
+	struct vm_area_struct *vma;
+	struct mm_struct *mm = task->mm;
+
+	if (!regs || !mm)
+		return -ENOMEM;
+
+	sp = cc->nr > 0 ? cc->curr_sp :
+		quadd_user_stack_pointer(regs);
+
+	vma = find_vma(mm, sp);
+	if (!vma)
+		return -ENOMEM;
+
+	return vma->vm_end - sp;
+}
+
 static void
 read_all_sources(struct pt_regs *regs, struct task_struct *task)
 {
@@ -344,6 +384,11 @@ read_all_sources(struct pt_regs *regs, struct task_struct *task)
 
 	s->reserved = 0;
 
+	cc->nr = 0;
+	cc->curr_sp = 0;
+	cc->curr_fp = 0;
+	cc->curr_pc = 0;
+
 	if (ctx->param.backtrace) {
 		cc->unw_method = hrt.unw_method;
 		bt_size = quadd_get_user_callchain(user_regs, cc, ctx, task);
@@ -382,6 +427,15 @@ read_all_sources(struct pt_regs *regs, struct task_struct *task)
 		s->reserved |= cc->unw_rc << QUADD_SAMPLE_URC_SHIFT;
 	}
 	s->callchain_nr = bt_size;
+
+	if (hrt.get_stack_offset) {
+		long offset = get_stack_offset(task, user_regs, cc);
+		if (offset > 0) {
+			u32 off = offset >> 2;
+			off = min_t(u32, off, 0xffff);
+			extra_data |= off << QUADD_SED_STACK_OFFSET_SHIFT;
+		}
+	}
 
 	record_data.record_type = QUADD_RECORD_TYPE_SAMPLE;
 
@@ -594,6 +648,7 @@ int quadd_hrt_start(void)
 		hrt.ma_period = 0;
 
 	atomic64_set(&hrt.counter_samples, 0);
+	atomic64_set(&hrt.skipped_samples, 0);
 
 	reset_cpu_ctx();
 
@@ -614,6 +669,9 @@ int quadd_hrt_start(void)
 		hrt.use_arch_timer = 0;
 
 	pr_info("timer: %s\n", hrt.use_arch_timer ? "arch" : "monotonic clock");
+
+	hrt.get_stack_offset =
+		(extra & QUADD_PARAM_EXTRA_STACK_OFFSET) ? 1 : 0;
 
 	put_header();
 
@@ -640,8 +698,9 @@ void quadd_hrt_stop(void)
 {
 	struct quadd_ctx *ctx = hrt.quadd_ctx;
 
-	pr_info("Stop hrt, number of samples: %llu\n",
-		atomic64_read(&hrt.counter_samples));
+	pr_info("Stop hrt, samples all/skipped: %llu/%llu\n",
+		atomic64_read(&hrt.counter_samples),
+		atomic64_read(&hrt.skipped_samples));
 
 	if (ctx->pl310)
 		ctx->pl310->stop();
@@ -651,6 +710,7 @@ void quadd_hrt_stop(void)
 	hrt.active = 0;
 
 	atomic64_set(&hrt.counter_samples, 0);
+	atomic64_set(&hrt.skipped_samples, 0);
 
 	/* reset_cpu_ctx(); */
 }
@@ -666,7 +726,7 @@ void quadd_hrt_deinit(void)
 void quadd_hrt_get_state(struct quadd_module_state *state)
 {
 	state->nr_all_samples = atomic64_read(&hrt.counter_samples);
-	state->nr_skipped_samples = 0;
+	state->nr_skipped_samples = atomic64_read(&hrt.skipped_samples);
 }
 
 static void init_arch_timer(void)
@@ -706,13 +766,15 @@ struct quadd_hrt_ctx *quadd_hrt_init(struct quadd_ctx *ctx)
 	if (!hrt.cpu_ctx)
 		return ERR_PTR(-ENOMEM);
 
-	for (cpu_id = 0; cpu_id < nr_cpu_ids; cpu_id++) {
+	for_each_possible_cpu(cpu_id) {
 		cpu_ctx = per_cpu_ptr(hrt.cpu_ctx, cpu_id);
 
 		atomic_set(&cpu_ctx->nr_active, 0);
 
 		cpu_ctx->active_thread.pid = -1;
 		cpu_ctx->active_thread.tgid = -1;
+
+		cpu_ctx->cc.hrt = &hrt;
 
 		init_hrtimer(cpu_ctx);
 	}

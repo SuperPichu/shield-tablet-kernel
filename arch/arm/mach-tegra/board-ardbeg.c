@@ -527,6 +527,7 @@ static struct tegra_usb_platform_data tegra_ehci1_utmi_pdata = {
 		.hot_plug = false,
 		.remote_wakeup_supported = true,
 		.power_off_on_suspend = true,
+		.skip_resume = false,
 	},
 	.u_cfg.utmi = {
 		.hssync_start_delay = 0,
@@ -554,6 +555,7 @@ static struct tegra_usb_platform_data tegra_ehci2_utmi_pdata = {
 		.hot_plug = false,
 		.remote_wakeup_supported = true,
 		.power_off_on_suspend = true,
+		.skip_resume = true,
 	},
 	.u_cfg.utmi = {
 		.hssync_start_delay = 0,
@@ -580,6 +582,7 @@ static struct tegra_usb_platform_data tegra_ehci3_utmi_pdata = {
 		.hot_plug = false,
 		.remote_wakeup_supported = true,
 		.power_off_on_suspend = true,
+		.skip_resume = true,
 	},
 	.u_cfg.utmi = {
 	.hssync_start_delay = 0,
@@ -612,6 +615,7 @@ static struct tegra_usb_platform_data tegra_ehci2_hsic_baseband_pdata = {
 		.hot_plug = false,
 		.remote_wakeup_supported = true,
 		.power_off_on_suspend = true,
+		.skip_resume = true,
 	},
 };
 
@@ -626,6 +630,7 @@ static struct tegra_usb_platform_data tegra_ehci2_hsic_smsc_hub_pdata = {
 		.hot_plug = false,
 		.remote_wakeup_supported = true,
 		.power_off_on_suspend = true,
+		.skip_resume = true,
 	},
 };
 
@@ -682,10 +687,10 @@ static void ardbeg_usb_init(void)
 			 * over USB vbus that the board supports if we use
 			 * a quick charge 2 wall charger.
 			 */
-			tegra_udc_pdata.qc2_voltage = TEGRA_USB_QC2_9V;
-			tegra_udc_pdata.u_data.dev.qc2_current_limit_ma = 1200;
+			tegra_udc_pdata.qc2_voltage = TEGRA_USB_QC2_12V;
+			tegra_udc_pdata.u_data.dev.qc2_current_limit_ma = 1300;
 
-			/* charger needs to be set to 3A - h/w will do 2A */
+			/* charger needs to be set to 3A - h/w will do 2A  */
 			tegra_udc_pdata.u_data.dev.dcp_current_limit_ma = 3000;
 		}
 
@@ -859,8 +864,8 @@ static struct tegra_usb_modem_power_platform_data baseband_pdata = {
 	.boot_irq_flags = IRQF_TRIGGER_RISING |
 				    IRQF_TRIGGER_FALLING |
 				    IRQF_ONESHOT,
-	.autosuspend_delay = 1000,
-	.short_autosuspend_delay = 1000,
+	.autosuspend_delay = 500,
+	.short_autosuspend_delay = 500,
 	.tegra_ehci_device = &tegra_ehci2_device,
 	.tegra_ehci_pdata = &tegra_ehci2_hsic_baseband_pdata,
 	.mdm_power_report_gpio = MDM_POWER_REPORT,

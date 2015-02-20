@@ -78,6 +78,20 @@
 #include <dhd_pno.h>
 #endif
 
+#ifdef CONFIG_BCMDHD_CUSTOM_SYSFS_TEGRA
+#include "dhd_custom_sysfs_tegra.h"
+
+#define RX_CAPTURE(skb)\
+	{\
+		tegra_sysfs_histogram_tcpdump_rx(skb, __func__, __LINE__);\
+	}\
+
+#else
+
+#define RX_CAPTURE(skb)
+
+#endif
+
 #ifdef WLMEDIA_HTSF
 #include <linux/time.h>
 #include <htsf.h>
@@ -957,6 +971,9 @@ static int dhd_set_suspend(int value, dhd_pub_t *dhd)
 #ifdef PKT_FILTER_SUPPORT
 				dhd->early_suspended = 1;
 #endif
+#ifdef CONFIG_BCMDHD_CUSTOM_SYSFS_TEGRA
+				tegra_sysfs_suspend();
+#endif
 				/* Kernel suspended */
 				DHD_ERROR(("%s: force extra Suspend setting \n", __FUNCTION__));
 
@@ -989,6 +1006,9 @@ static int dhd_set_suspend(int value, dhd_pub_t *dhd)
 			} else {
 #ifdef PKT_FILTER_SUPPORT
 				dhd->early_suspended = 0;
+#endif
+#ifdef CONFIG_BCMDHD_CUSTOM_SYSFS_TEGRA
+				tegra_sysfs_resume();
 #endif
 				/* Kernel resumed  */
 				DHD_ERROR(("%s: Remove extra suspend setting \n", __FUNCTION__));
@@ -1845,6 +1865,10 @@ dhd_start_xmit(struct sk_buff *skb, struct net_device *net)
 		}
 	}
 
+#ifdef CONFIG_BCMDHD_CUSTOM_SYSFS_TEGRA
+	tegra_sysfs_histogram_tcpdump_tx(skb, __func__, __LINE__);
+#endif
+
 	/* Convert to packet */
 	if (!(pktbuf = PKTFRMNATIVE(dhd->pub.osh, skb))) {
 		DHD_ERROR(("%s: PKTFRMNATIVE failed\n",
@@ -2088,6 +2112,7 @@ dhd_rx_frame(dhd_pub_t *dhdp, int ifidx, void *pktbuf, int numpkt, uint8 chan)
 		dhd_htsf_addrxts(dhdp, pktbuf);
 #endif
 		/* Strip header, count, deliver upward */
+		RX_CAPTURE(skb);
 		skb_pull(skb, ETH_HLEN);
 
 		/* Process special event packets and then discard them */
@@ -4823,6 +4848,14 @@ dhd_net_attach(dhd_pub_t *dhdp, int ifidx)
 		err = register_netdev(net);
 	else
 		err = register_netdevice(net);
+
+#ifdef CONFIG_BCMDHD_CUSTOM_SYSFS_TEGRA
+{
+	extern struct net_device *dhd_custom_sysfs_tegra_histogram_stat_netdev;
+	if (ifidx == 0)
+		dhd_custom_sysfs_tegra_histogram_stat_netdev = net;
+}
+#endif
 
 	if (err != 0) {
 		DHD_ERROR(("couldn't register the net device, err %d\n", err));

@@ -4,7 +4,7 @@
  * Copyright (C) 2010 Google, Inc.
  * Author: Erik Gilling <konkers@android.com>
  *
- * Copyright (c) 2010-2014, NVIDIA CORPORATION, All rights reserved.
+ * Copyright (c) 2010-2015, NVIDIA CORPORATION, All rights reserved.
  *
  * This software is licensed under the terms of the GNU General Public
  * License version 2, as published by the Free Software Foundation, and
@@ -1109,11 +1109,6 @@ static void _tegra_dc_update_cmu(struct tegra_dc *dc, struct tegra_dc_cmu *cmu)
 
 	tegra_dc_cache_cmu(dc, cmu);
 
-	if (dc->cmu_skip_once) {
-		dc->cmu_skip_once = false;
-		return;
-	}
-
 	/* Disable CMU to avoid programming it while it is in use */
 	val = tegra_dc_readl(dc, DC_DISP_DISP_COLOR_CONTROL);
 	if (val & CMU_ENABLE) {
@@ -1161,22 +1156,32 @@ static int _tegra_dc_config_frame_end_intr(struct tegra_dc *dc, bool enable)
 	return 0;
 }
 
-int tegra_dc_update_cmu_aligned(struct tegra_dc *dc, struct tegra_dc_cmu *cmu)
+static int _tegra_dc_update_cmu_aligned(struct tegra_dc *dc,
+				struct tegra_dc_cmu *cmu,
+				bool force)
 {
-	mutex_lock(&dc->lock);
-	if (!dc->enabled) {
-		mutex_unlock(&dc->lock);
+	if (!dc->cmu_enabled)
 		return 0;
-	}
 
 	memcpy(&dc->cmu_shadow, cmu, sizeof(dc->cmu));
 	dc->cmu_shadow_dirty = true;
+	dc->cmu_shadow_force_update = dc->cmu_shadow_force_update || force;
 	_tegra_dc_config_frame_end_intr(dc, true);
-
-	mutex_unlock(&dc->lock);
 
 	return 0;
 }
+
+int tegra_dc_update_cmu_aligned(struct tegra_dc *dc, struct tegra_dc_cmu *cmu)
+{
+	int ret;
+
+	mutex_lock(&dc->lock);
+	ret = _tegra_dc_update_cmu_aligned(dc, cmu, false);
+	mutex_unlock(&dc->lock);
+
+	return ret;
+}
+
 EXPORT_SYMBOL(tegra_dc_update_cmu_aligned);
 
 static struct tegra_dc_cmu *tegra_dc_get_cmu(struct tegra_dc *dc)
@@ -1402,16 +1407,6 @@ static int tegra_dc_set_out(struct tegra_dc *dc, struct tegra_dc_out *out)
 				dc->out->h_size, dc->out->v_size,
 				dc->mode.pclk);
 		dc->initialized = true;
-
-#ifdef CONFIG_TEGRA_DC_CMU
-		/*
-		 * If the bootloader already set the mode, assume the CMU
-		 * parameters are also correctly set. It would be better to
-		 * read them, but unfortunately there is no reliable and
-		 * flicker-free way to do this!
-		 */
-		tegra_dc_cache_cmu(dc, tegra_dc_get_cmu(dc));
-#endif
 	} else if (out->n_modes > 0)
 		tegra_dc_set_mode(dc, &dc->out->modes[0]);
 
@@ -1447,6 +1442,10 @@ static int tegra_dc_set_out(struct tegra_dc *dc, struct tegra_dc_out *out)
 		dc->out_ops = NULL;
 		break;
 	}
+
+#ifdef CONFIG_TEGRA_DC_CMU
+	tegra_dc_cache_cmu(dc, tegra_dc_get_cmu(dc));
+#endif
 
 	if (dc->out_ops && dc->out_ops->init) {
 		err = dc->out_ops->init(dc);
@@ -1763,7 +1762,8 @@ static void tegra_dc_vblank(struct work_struct *work)
 }
 
 #define CSC_UPDATE_IF_CHANGED(entry, ENTRY) do { \
-		if (cmu_active->csc.entry != cmu_shadow->csc.entry) { \
+		if (cmu_active->csc.entry != cmu_shadow->csc.entry || \
+			dc->cmu_shadow_force_update) { \
 			cmu_active->csc.entry = cmu_shadow->csc.entry; \
 			tegra_dc_writel(dc, \
 				cmu_active->csc.entry, \
@@ -1791,6 +1791,16 @@ static void tegra_dc_frame_end(struct work_struct *work)
 		struct tegra_dc_cmu *cmu_active = &dc->cmu;
 		struct tegra_dc_cmu *cmu_shadow = &dc->cmu_shadow;
 
+		for (i = 0; i < 256; i++) {
+			if (cmu_active->lut1[i] != cmu_shadow->lut1[i] ||
+				dc->cmu_shadow_force_update) {
+				cmu_active->lut1[i] = cmu_shadow->lut1[i];
+				val = LUT1_ADDR(i) |
+					LUT1_DATA(cmu_shadow->lut1[i]);
+				tegra_dc_writel(dc, val, DC_COM_CMU_LUT1);
+			}
+		}
+
 		CSC_UPDATE_IF_CHANGED(krr, KRR);
 		CSC_UPDATE_IF_CHANGED(kgr, KGR);
 		CSC_UPDATE_IF_CHANGED(kbr, KBR);
@@ -1802,7 +1812,8 @@ static void tegra_dc_frame_end(struct work_struct *work)
 		CSC_UPDATE_IF_CHANGED(kbb, KBB);
 
 		for (i = 0; i < 960; i++)
-			if (cmu_active->lut2[i] != cmu_shadow->lut2[i]) {
+			if (cmu_active->lut2[i] != cmu_shadow->lut2[i] ||
+				dc->cmu_shadow_force_update) {
 				cmu_active->lut2[i] = cmu_shadow->lut2[i];
 				val = LUT2_ADDR(i) |
 					LUT2_DATA(cmu_active->lut2[i]);
@@ -1810,6 +1821,7 @@ static void tegra_dc_frame_end(struct work_struct *work)
 			}
 
 		dc->cmu_shadow_dirty = false;
+		dc->cmu_shadow_force_update = false;
 		_tegra_dc_config_frame_end_intr(dc, false);
 	}
 
@@ -2328,7 +2340,11 @@ static int tegra_dc_init(struct tegra_dc *dc)
 #endif
 
 #ifdef CONFIG_TEGRA_DC_CMU
-	_tegra_dc_update_cmu(dc, tegra_dc_get_cmu(dc));
+	if (dc->is_cmu_set_bl)
+		_tegra_dc_update_cmu_aligned(dc, &dc->cmu, true);
+	else
+		_tegra_dc_update_cmu(dc, &dc->cmu);
+	dc->is_cmu_set_bl = false;
 #endif
 	tegra_dc_set_color_control(dc);
 	for_each_set_bit(i, &dc->valid_windows, DC_N_WINDOWS) {
@@ -3196,7 +3212,7 @@ static int tegra_dc_probe(struct platform_device *ndev)
 
 #ifdef CONFIG_TEGRA_DC_CMU
 	/* if bootloader leaves this head enabled, then skip CMU programming. */
-	dc->cmu_skip_once = (dc->pdata->flags & TEGRA_DC_FLAG_ENABLED) != 0;
+	dc->is_cmu_set_bl = (dc->pdata->flags & TEGRA_DC_FLAG_ENABLED) != 0;
 	dc->cmu_enabled = dc->pdata->cmu_enable;
 #endif
 
@@ -3432,21 +3448,6 @@ static int tegra_dc_suspend(struct platform_device *ndev, pm_message_t state)
 
 	if (!ret)
 		tegra_dc_io_end(dc);
-
-#ifdef CONFIG_TEGRA_DC_CMU
-	/*
-	 * CMU settings are lost when the DC goes to sleep. User-space will
-	 * perform a blank ioctl upon resume which will call tegra_dc_init()
-	 * and apply CMU settings again, but only if the cached values are
-	 * different from those specified. Clearing the cache here ensures
-	 * that this will happen.
-	 *
-	 * It would be better to reapply the CMU settings in tegra_dc_resume(),
-	 * but color corruption sometimes happens if we do so and
-	 * tegra_dc_init() seems to be the only safe place for this.
-	 */
-	memset(&dc->cmu, 0, sizeof(dc->cmu));
-#endif
 
 	mutex_unlock(&dc->lock);
 	synchronize_irq(dc->irq); /* wait for IRQ handlers to finish */
