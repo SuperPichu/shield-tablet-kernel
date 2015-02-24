@@ -30,7 +30,7 @@ OUTPUT_ARCH(arm)
 
 SECTIONS
 {
-	. = VDSO_LBASE + SIZEOF_HEADERS;
+	. = VDSO_LBASE + 1024;
 
 	.hash		: { *(.hash) }			:text
 	.gnu.hash	: { *(.gnu.hash) }
