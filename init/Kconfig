@@ -103,7 +103,7 @@ config HAVE_KERNEL_LZ4
 
 choice
 	prompt "Kernel compression mode"
-	default KERNEL_GZIP
+	default KERNEL_XZ
 	depends on HAVE_KERNEL_GZIP || HAVE_KERNEL_BZIP2 || HAVE_KERNEL_LZMA || HAVE_KERNEL_XZ || HAVE_KERNEL_LZO || HAVE_KERNEL_LZ4
 	help
 	  The linux kernel is a kind of self-extracting executable.
